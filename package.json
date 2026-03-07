@@ -1,20 +1,19 @@
 {
-  "name": "websockserver",
+  "name": "video-sync-server",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "WS server for video synchronization",
+  "main": "websocket.js",
   "scripts": {
     "start": "nodemon websocket.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "wemonk",
   "license": "ISC",
   "dependencies": {
     "axios": "^1.13.6",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "nodemon": "^3.1.10",
-    "uuid": "^13.0.0",
     "ws": "^8.18.3"
   }
 }
