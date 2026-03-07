@@ -1,11 +1,20 @@
 const ws = require('ws')
-const uuid = require('uuid')
+// const uuid = require('uuid')
+
+const PORT = process.env.PORT || 5000;
+
+function heartbeat() {
+  this.isAlive = true;
+}
 
 const wss = new ws.Server({
-  port: 5000,
+  port: PORT,
 }, () => {console.log('Server started! 5000')});
 
 wss.on('connection', function connection(ws) {
+  ws.isAlive = true;
+  ws.on('pong', heartbeat);
+
   ws.on('message', (messageStr) => {
     // Лучше обернуть в try/catch, чтобы сервер не падал от битого JSON
     try {
@@ -51,7 +60,25 @@ wss.on('connection', function connection(ws) {
       console.error('Ошибка парсинга JSON:', e);
     }
   })
+
+  ws.on('error', console.error);
 })
+
+const interval = setInterval(function ping() {
+  wss.clients.forEach(function each(wsConnect) {
+    if (wsConnect.isAlive === false) {
+      console.log('Terminating dead connection...');
+      return wsConnect.terminate(); // Удаляем мертвое соединение
+    }
+
+    wsConnect.isAlive = false; // Сбрасываем флаг перед проверкой
+    wsConnect.ping(); // Отправляем системный Ping
+  });
+}, 30000);
+
+wss.on('close', () => {
+  clearInterval(interval);
+});
 
 wss.on('disconnect', function disconnect(ws) {
 
