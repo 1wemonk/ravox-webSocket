@@ -1,7 +1,9 @@
 const ws = require('ws')
-// const uuid = require('uuid')
 
 const PORT = process.env.PORT || 5000;
+
+// Хранилище комнат: roomId -> { hostId: string, users: Map<userId, ws> }
+const rooms = new Map();
 
 function heartbeat() {
   this.isAlive = true;
@@ -11,90 +13,239 @@ const wss = new ws.Server({
   port: PORT,
 }, () => {console.log('Server started! 5000')});
 
+function getOrCreateRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, { hostId: null, users: new Map() });
+  }
+  return rooms.get(roomId);
+}
+
+function assignHost(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || room.users.size === 0) return null;
+
+  // Берём первого пользователя как хоста
+  const firstUser = room.users.keys().next().value;
+  room.hostId = firstUser;
+
+  // Уведомляем всех о смене хоста
+  broadcastToRoom(roomId, {
+    type: 'host-assigned',
+    userId: firstUser,
+    username: room.users.get(firstUser)?.userName || 'Unknown'
+  });
+
+  return firstUser;
+}
+
+function broadcastToRoom(roomId, message, excludeUserId = null) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  room.users.forEach((client, userId) => {
+    if (userId !== excludeUserId && client.readyState === ws.OPEN) {
+      client.send(JSON.stringify(message));
+    }
+  });
+}
+
+function sendToUser(roomId, targetUserId, message) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const client = room.users.get(targetUserId);
+  if (client && client.readyState === ws.OPEN) {
+    client.send(JSON.stringify(message));
+  }
+}
+
 wss.on('connection', function connection(ws) {
   ws.isAlive = true;
   ws.on('pong', heartbeat);
 
   ws.on('message', (messageStr) => {
-    // Лучше обернуть в try/catch, чтобы сервер не падал от битого JSON
     try {
       const data = JSON.parse(messageStr);
-      console.log(data);
+      console.log('[WS Message]', data.message?.type, 'from', data.message?.userId || data.message?.user_id);
 
-      switch (data.message.type) {
-        case 'connect':
-          // Сохраняем ключевые данные пользовтеля
-          ws.roomId = data.room_id; // id комнаты, чтобы не попадать в чужие
-          ws.userId = data.message.user_id; // ID юзера
-          ws.userName = data.message.username; // имя юзера
+      const msg = data.message;
+      const roomId = data.room_id;
 
-          sendMessageToRoom(data);
+      switch (msg.type) {
+        case 'connect': {
+          ws.roomId = roomId;
+          ws.userId = msg.userId || msg.user_id; // поддерживаем оба варианта
+          ws.userName = msg.username;
+
+          const room = getOrCreateRoom(roomId);
+          room.users.set(ws.userId, ws);
+
+          // Если нет хоста — назначаем текущего
+          if (!room.hostId) {
+            room.hostId = ws.userId;
+            msg.isHost = true; // помечаем в сообщении
+          }
+
+          // Отправляем текущему пользователю инфу о хосте
+          ws.send(JSON.stringify({
+            type: 'host-info',
+            hostId: room.hostId,
+            isHost: room.hostId === ws.userId
+          }));
+
+          // Уведомляем комнату о подключении
+          broadcastToRoom(roomId, {
+            type: 'connect',
+            userId: ws.userId,
+            username: ws.userName,
+            message: `Пользователь ${ws.userName} подключился!`,
+            send_time: new Date().toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit', second:'2-digit'}),
+            timestamp: Date.now()
+          }, ws.userId);
           break;
+        }
+
+        case 'message': {
+          broadcastToRoom(roomId, {
+            ...msg,
+            user_id: msg.userId || msg.user_id, // нормализуем для клиента
+            send_time: msg.send_time || new Date().toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit', second:'2-digit'})
+          });
+          break;
+        }
+
+        // WebRTC Signaling — критически важно: отправляем конкретному пользователю
+        case 'screen-share-offer': {
+          if (msg.targetUserId) {
+            sendToUser(roomId, msg.targetUserId, {
+              type: 'screen-share-offer',
+              offer: msg.offer,
+              userId: msg.userId,
+              username: msg.username,
+              targetUserId: msg.targetUserId
+            });
+          }
+          break;
+        }
+
+        case 'screen-share-answer': {
+          if (msg.targetUserId) {
+            sendToUser(roomId, msg.targetUserId, {
+              type: 'screen-share-answer',
+              answer: msg.answer,
+              userId: msg.userId,
+              targetUserId: msg.targetUserId
+            });
+          }
+          break;
+        }
+
+        case 'ice-candidate': {
+          if (msg.targetUserId) {
+            sendToUser(roomId, msg.targetUserId, {
+              type: 'ice-candidate',
+              candidate: msg.candidate,
+              userId: msg.userId,
+              targetUserId: msg.targetUserId
+            });
+          }
+          break;
+        }
+
+        case 'request-screen-share': {
+          // Пересылаем запрос хосту (если это не сам хост запрашивает)
+          const room = rooms.get(roomId);
+          if (room && room.hostId && room.hostId !== msg.userId) {
+            sendToUser(roomId, room.hostId, {
+              type: 'request-screen-share',
+              userId: msg.userId,
+              username: msg.username
+            });
+          }
+          break;
+        }
+
+        case 'screen-share-stopped': {
+          broadcastToRoom(roomId, {
+            type: 'screen-share-stopped',
+            userId: msg.userId,
+            username: msg.username
+          });
+          break;
+        }
 
         case 'PLAY_VIDEO':
-          console.log(`Пользователь ${ws.userName} запустил видео`);
-          sendMessageToRoom(data);
-          break;
-
         case 'PAUSE_VIDEO':
-          console.log(`Пользователь ${ws.userName} поставил на паузу`);
-          sendMessageToRoom(data);
-          break;
-
         case 'SEEK_VIDEO':
-          console.log(`Пользователь ${ws.userName} перемотал на ${data.message.currentTime}`);
-          sendMessageToRoom(data);
+        case 'SYNC_STATE': {
+          // Видео-команды только от хоста всем остальным
+          broadcastToRoom(roomId, msg, msg.userId);
           break;
+        }
 
-        case 'SYNC_STATE':
-          console.log(`Синхронизация состояния для комнаты ${data.room_id}`);
-          sendMessageToRoom(data);
+        case 'disconnect': {
+          // Ручной disconnect от клиента
+          handleDisconnect(ws);
           break;
-
-        case 'message':
-        case 'disconnect':
-          sendMessageToRoom(data);
-          break;
+        }
       }
     } catch (e) {
-      console.error('Ошибка парсинга JSON:', e);
+      console.error('Ошибка обработки сообщения:', e);
     }
-  })
+  });
 
   ws.on('error', console.error);
-})
+
+  ws.on('close', () => {
+    handleDisconnect(ws);
+  });
+});
+
+function handleDisconnect(ws) {
+  if (!ws.roomId || !ws.userId) return;
+
+  const room = rooms.get(ws.roomId);
+  if (!room) return;
+
+  room.users.delete(ws.userId);
+
+  // Уведомляем комнату
+  broadcastToRoom(ws.roomId, {
+    type: 'disconnect',
+    userId: ws.userId,
+    username: ws.userName,
+    message: `Пользователь ${ws.userName} вышел!`,
+    send_time: new Date().toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit', second:'2-digit'})
+  });
+
+  // Если ушёл хост — переназначаем
+  if (room.hostId === ws.userId) {
+    const newHostId = assignHost(ws.roomId);
+    console.log(`Host left room ${ws.roomId}, new host: ${newHostId}`);
+  }
+
+  // Если комната пуста — удаляем
+  if (room.users.size === 0) {
+    rooms.delete(ws.roomId);
+    console.log(`Room ${ws.roomId} deleted (empty)`);
+  }
+}
 
 const interval = setInterval(function ping() {
   wss.clients.forEach(function each(wsConnect) {
     if (wsConnect.isAlive === false) {
       console.log('Terminating dead connection...');
-      return wsConnect.terminate(); // Удаляем мертвое соединение
+      wsConnect.terminate();
+      return;
     }
-
-    wsConnect.isAlive = false; // Сбрасываем флаг перед проверкой
-    wsConnect.ping(); // Отправляем системный Ping
+    wsConnect.isAlive = false;
+    wsConnect.ping();
   });
 }, 30000);
 
 wss.on('close', () => {
   clearInterval(interval);
 });
-
-wss.on('disconnect', function disconnect(ws) {
-
-})
-
-function sendMessageToRoom(data) {
-  wss.clients.forEach(client => {
-    // 2. Фильтрация:
-    // - client.roomId === data.room_id: отправляем только тем, кто в той же комнате
-    // - client.readyState === ws.OPEN: проверяем, что соединение открыто
-
-    if (client.roomId === data.room_id && client.readyState === ws.OPEN) {
-      client.send(JSON.stringify(data.message));
-    }
-  })
-}
 
 // ПРОТОТИП СООБЩЕНИЯ
 // const message = {
