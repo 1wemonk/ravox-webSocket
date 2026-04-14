@@ -66,7 +66,7 @@ wss.on('connection', function connection(ws) {
   ws.on('message', (messageStr) => {
     try {
       const data = JSON.parse(messageStr);
-      console.log('[WS Message]', data.message?.type, 'from', data.message?.userId || data.message?.user_id);
+      console.log('[WS Message]', `type ${data.message?.type}`, 'from', data.message?.userId || data.message?.user_id, ' : ', data.message.username);
 
       const msg = data.message;
       const roomId = data.room_id;
@@ -186,6 +186,16 @@ wss.on('connection', function connection(ws) {
         case 'disconnect': {
           // Ручной disconnect от клиента
           handleDisconnect(ws);
+          break;
+        }
+        case 'screen-share-started': {
+          // Broadcast всем кроме отправителя (хоста)
+          broadcastToRoom(roomId, {
+            type: 'screen-share-started',
+            userId: msg.userId,
+            username: msg.username,
+            timestamp: Date.now()
+          }, msg.userId);
           break;
         }
       }
