@@ -116,12 +116,12 @@ wss.on('connection', function connection(ws) {
 
         // WebRTC Signaling — критически важно: отправляем конкретному пользователю
         case 'screen-share-offer': {
+          console.log('[Server] Forwarding offer from', msg.userId, 'to', msg.targetUserId);
           if (msg.targetUserId) {
             sendToUser(roomId, msg.targetUserId, {
               type: 'screen-share-offer',
               offer: msg.offer,
               userId: msg.userId,
-              username: msg.username,
               targetUserId: msg.targetUserId
             });
           }
